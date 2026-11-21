@@ -3,13 +3,14 @@
     "name": "神医媒体订阅请求",
     "description": "接收神医的媒体订阅请求并创建订阅。",
     "labels": "订阅",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "icon": "https://raw.githubusercontent.com/sjtuross/MoviePilot-Plugins/main/icons/sadiscoversub.png",
     "author": "sjtuross",
     "level": 1,
     "history": {
-      "v0.1.1": "增加媒体服务器未配置警告、Webhook 接收日志和前置要求说明。",
-      "v0.1.0": "初始版本，支持接收神医的 library.subscribe 通知并创建订阅。"
+      "v0.1.2": "优先使用DoubanId，豆瓣识别失败时回退TmdbId",
+      "v0.1.1": "增加媒体服务器未配置警告、Webhook接收日志和前置要求说明",
+      "v0.1.0": "初始版本，支持接收神医的library.subscribe通知并创建订阅"
     }
   }
 }

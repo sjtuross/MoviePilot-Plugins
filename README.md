@@ -21,7 +21,7 @@ http://<地址>:3001/api/v1/webhook/?token=<API_TOKEN>
 
 ### 规则
 
-- 优先使用 `Item.ProviderIds.Tmdb`，没有时回退 `Item.ProviderIds.Douban`
-- 不使用 `Item.Type` 判断电影/电视剧，因为探索频道条目的类型是 `Trailer`
+- 使用 `Item.ProviderIds.DiscoverItemType` 判断电影/电视剧；不使用 `Item.Type`，因为探索频道条目的类型是 `Trailer`
+- 优先使用权威的 `Item.ProviderIds.Douban` 创建订阅；豆瓣识别失败时才回退 `Item.ProviderIds.Tmdb`
 - 从 `Item.Name` 解析季号，兼容 `第二季`、`Season 2`、`S2` 等写法
 - 使用 `exist_ok=True` 创建订阅，并在插件详情页保留最近 100 条处理记录

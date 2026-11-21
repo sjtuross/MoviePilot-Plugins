@@ -13,7 +13,7 @@ from app.core.metainfo import MetaInfo
 from app.helper.mediaserver import MediaServerHelper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType
+from app.schemas.types import EventType, MediaType
 
 __all__ = ["SaDiscoverSub"]
 
@@ -24,7 +24,7 @@ class SaDiscoverSub(_PluginBase):
     plugin_name = "神医媒体订阅请求"
     plugin_desc = "接收神医的媒体订阅请求并创建订阅。"
     plugin_icon = "https://raw.githubusercontent.com/sjtuross/MoviePilot-Plugins/main/icons/sadiscoversub.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "sjtuross"
     author_url = "https://github.com/sjtuross"
     plugin_config_prefix = "sadiscoversub_"
@@ -217,6 +217,60 @@ class SaDiscoverSub(_PluginBase):
         logger.info(f"收到 library.subscribe 事件：{item.get('Name') or item.get('Id') or '未知条目'}")
         self._handle_subscribe_request(raw, item)
 
+    @staticmethod
+    def _resolve_media_type(discover_item_type: Optional[str]) -> Optional[MediaType]:
+        """使用 DiscoverItemType 判断电影/电视剧；缺失时交由宿主识别。"""
+        normalized_type = str(discover_item_type or "").strip().lower()
+        if normalized_type == "tv":
+            return MediaType.TV
+        if normalized_type == "movie":
+            return MediaType.MOVIE
+        return None
+
+    @staticmethod
+    def _is_recognition_failure(message: str) -> bool:
+        """判断订阅失败是否属于媒体身份未识别，可安全回退 TMDB。"""
+        return "未识别到媒体信息" in str(message or "")
+
+    def _create_subscription(
+        self,
+        title: str,
+        year: str,
+        detected_type: Optional[MediaType],
+        season: Optional[int],
+        media_source: str,
+        media_id: str,
+        username: Optional[str],
+    ) -> Tuple[Optional[int], str]:
+        """使用指定媒体身份创建订阅，异常转为返回结果。"""
+        try:
+            if media_source == "douban":
+                return SubscribeChain().add(
+                    title=title,
+                    year=year,
+                    mtype=detected_type,
+                    season=season,
+                    tmdbid=None,
+                    doubanid=media_id,
+                    username=username,
+                    message=self._message,
+                    exist_ok=True,
+                )
+            return SubscribeChain().add(
+                title=title,
+                year=year,
+                mtype=detected_type,
+                season=season,
+                tmdbid=int(media_id),
+                doubanid=None,
+                username=username,
+                message=self._message,
+                exist_ok=True,
+            )
+        except Exception as error:
+            logger.error(f"使用 {media_source}:{media_id} 创建订阅异常：{error}")
+            return None, f"失败：{error}"
+
     def _handle_subscribe_request(self, raw: Dict[str, Any], item: Dict[str, Any]) -> None:
         """解析事件字段并调用订阅链创建订阅。"""
         provider_ids = item.get("ProviderIds") or {}
@@ -230,9 +284,14 @@ class SaDiscoverSub(_PluginBase):
 
         tmdb_raw = normalized_ids.get("tmdb")
         douban_id = normalized_ids.get("douban")
+        discover_item_type = normalized_ids.get("discoveritemtype")
         tmdb_id = int(tmdb_raw) if tmdb_raw and tmdb_raw.isdigit() else None
-        if not tmdb_id and not douban_id:
-            self._record_event(item, None, None, "忽略：缺少 TMDB/豆瓣标识")
+        if douban_id:
+            media_source, media_id = "douban", douban_id
+        elif tmdb_id:
+            media_source, media_id = "tmdb", str(tmdb_id)
+        else:
+            self._record_event(item, tmdb_id, douban_id, "忽略：缺少 TMDB/豆瓣标识")
             logger.warning("library.subscribe 事件缺少 TMDB/豆瓣标识，已忽略")
             return
 
@@ -243,39 +302,63 @@ class SaDiscoverSub(_PluginBase):
             return
 
         season = self._parse_season(title, item)
+        detected_type = self._resolve_media_type(discover_item_type)
         year = str(item.get("ProductionYear") or "").strip()
         user = raw.get("User") or {}
         username = str(user.get("Name") or "").strip() or None
-        identity = f"tmdb:{tmdb_id}" if tmdb_id else f"douban:{douban_id}"
+        identity = f"douban:{douban_id}" if douban_id else f"tmdb:{tmdb_id}"
         duplicate_key = f"{identity}:{season or ''}"
+
+        season_log = f"season={season}，" if season else ""
+        logger.info(
+            f"订阅识别参数：title={title}，tmdb={tmdb_id or '-'}，douban={douban_id or '-'}，"
+            f"DiscoverItemType={discover_item_type or '-'}，{season_log}"
+            f"mtype={detected_type.value if detected_type else 'auto'}"
+        )
 
         if self._is_duplicate(duplicate_key):
             self._record_event(item, tmdb_id, douban_id, "跳过：重复事件", season)
             logger.info(f"忽略重复的 library.subscribe 事件：{title} ({duplicate_key})")
             return
 
-        try:
-            subscribe_id, result_message = SubscribeChain().add(
+        used_source, used_id = media_source, media_id
+        subscribe_id, result_message = self._create_subscription(
+            title=title,
+            year=year,
+            detected_type=detected_type,
+            season=season,
+            media_source=media_source,
+            media_id=media_id,
+            username=username,
+        )
+
+        if (not subscribe_id and douban_id and tmdb_id
+                and self._is_recognition_failure(result_message)):
+            logger.warning(
+                f"豆瓣 {douban_id} 未识别到媒体信息：{result_message}，改用 TMDB {tmdb_id} 重试"
+            )
+            used_source, used_id = "tmdb", str(tmdb_id)
+            subscribe_id, result_message = self._create_subscription(
                 title=title,
                 year=year,
-                mtype=None,
+                detected_type=detected_type,
                 season=season,
-                tmdbid=tmdb_id,
-                doubanid=douban_id,
+                media_source=used_source,
+                media_id=used_id,
                 username=username,
-                message=self._message,
-                exist_ok=True,
             )
-        except Exception as error:
-            self._record_event(item, tmdb_id, douban_id, f"失败：{error}", season)
-            logger.error(f"创建订阅失败：{title} ({duplicate_key})，{error}")
-            return
 
         status = "已创建" if subscribe_id else "未新增"
         if result_message:
             status = f"{status}：{result_message}"
-        self._record_event(item, tmdb_id, douban_id, status, season)
-        logger.info(f"library.subscribe 处理完成：{title}，订阅 ID：{subscribe_id}，结果：{result_message}")
+        used_identity = f"{used_source}:{used_id}"
+        self._record_event(
+            item, tmdb_id, douban_id, status, season,
+            identity_override=used_identity,
+        )
+        logger.info(
+            f"library.subscribe {status}：{title}，{used_identity}，订阅 ID：{subscribe_id}"
+        )
 
     @staticmethod
     def _parse_season(title: str, item: Dict[str, Any]) -> Optional[int]:
@@ -324,14 +407,17 @@ class SaDiscoverSub(_PluginBase):
         douban_id: Optional[str],
         status: str,
         season: Optional[int] = None,
+        identity_override: Optional[str] = None,
     ) -> None:
         """把一次处理结果写入插件历史记录。"""
         now = time.time()
         title = str(item.get("Name") or "").strip()
-        if tmdb_id:
-            identity = f"tmdb:{tmdb_id}"
+        if identity_override:
+            identity = identity_override
         elif douban_id:
             identity = f"douban:{douban_id}"
+        elif tmdb_id:
+            identity = f"tmdb:{tmdb_id}"
         else:
             identity = ""
         entry = {
